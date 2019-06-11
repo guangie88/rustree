@@ -1,0 +1,7 @@
+[package]
+name = "rustree"
+version = "0.1.0"
+authors = ["Chen Weiguang <chen.weiguang@gmail.com>"]
+edition = "2018"
+
+[dependencies]
