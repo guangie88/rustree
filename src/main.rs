@@ -2,8 +2,10 @@
 extern crate lazy_static;
 
 use regex::Regex;
-use rusoto_core::Region;
-use rusoto_s3::{GetObjectRequest, PutObjectRequest, S3Client};
+use rusoto_core::{HttpClient, Region};
+use rusoto_credential::EnvironmentProvider;
+use rusoto_s3::{GetObjectRequest, PutObjectRequest, S3Client, S3};
+use std::io::Read;
 use std::str::FromStr;
 use structopt::StructOpt;
 
@@ -69,16 +71,31 @@ enum Subcommand {
 
 fn main() -> Result<(), Error> {
     let args = Args::from_args();
-    let s3 = S3Client::new(Region::ApSoutheast1);
+    let provider = EnvironmentProvider::default();
+
+    let s3 =
+        S3Client::new_with(HttpClient::new()?, provider, Region::ApSoutheast1);
 
     match args.subcommand {
         Subcommand::Cp { src, dst } => {
             let src_path = S3Path::from_str(&src)?;
             let dst_path = S3Path::from_str(&dst)?;
+
+            let obj_req = GetObjectRequest {
+                bucket: src_path.bucket.clone(),
+                key: src_path.key.clone(),
+                ..Default::default()
+            };
+
+            let obj_output = s3.get_object(obj_req).sync()?;
+
+            let mut stream = obj_output.body.unwrap().into_blocking_read();
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body)?;
+
+            println!("{}", body.len());
         }
     }
 
     Ok(())
-
-    // s3.get_object(input: GetObjectRequest)
 }
