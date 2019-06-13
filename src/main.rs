@@ -1,15 +1,18 @@
 #[macro_use]
 extern crate lazy_static;
 
+use futures::future::Future;
 use regex::Regex;
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::EnvironmentProvider;
-use rusoto_s3::{GetObjectRequest, PutObjectRequest, S3Client, S3};
-use std::io::Read;
+use rusoto_s3::{
+    GetObjectRequest, ListObjectsV2Request, PutObjectRequest, S3Client, S3,
+};
+// use std::io::Read;
 use std::str::FromStr;
 use structopt::StructOpt;
 
-type Error = Box<std::error::Error>;
+type Error = Box<dyn std::error::Error>;
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -27,11 +30,11 @@ struct S3Path {
     pub key: String,
 }
 
-impl S3Path {
-    pub fn is_dir(&self) -> bool {
-        self.key.ends_with("/")
-    }
-}
+// impl S3Path {
+//     pub fn is_dir(&self) -> bool {
+//         self.key.ends_with("/")
+//     }
+// }
 
 impl FromStr for S3Path {
     type Err = Error;
@@ -39,13 +42,16 @@ impl FromStr for S3Path {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         lazy_static! {
             static ref RE: Regex =
-                Regex::new(r"^s3://(.+?)(?:/(.+))?$").unwrap();
+                Regex::new(r"^s3://(.+?)(?:/(.*))?$").unwrap();
         }
 
         let caps = RE.captures(s).unwrap();
-
         let bucket = caps.get(1).unwrap().as_str().to_owned();
-        let key = caps.get(2).unwrap().as_str().to_owned();
+
+        let key = match caps.get(2) {
+            Some(key) => key.as_str().to_owned(),
+            None => "".to_owned(),
+        };
 
         Ok(S3Path { bucket, key })
     }
@@ -77,35 +83,86 @@ fn main() -> Result<(), Error> {
     let s3 =
         S3Client::new_with(HttpClient::new()?, provider, Region::ApSoutheast1);
 
-    let dst_s3 =
-        S3Client::new_with(HttpClient::new()?, dst_provider, Region::ApSoutheast1);
+    let dst_s3 = S3Client::new_with(
+        HttpClient::new()?,
+        dst_provider,
+        Region::ApSoutheast1,
+    );
 
     match args.subcommand {
         Subcommand::Cp { src, dst } => {
             let src_path = S3Path::from_str(&src)?;
             let dst_path = S3Path::from_str(&dst)?;
 
-            // src
-            let get_obj_req = GetObjectRequest {
+            let list_objs_req = ListObjectsV2Request {
                 bucket: src_path.bucket.clone(),
-                key: src_path.key.clone(),
+                prefix: Some(src_path.key.clone()),
                 ..Default::default()
             };
 
-            let get_obj_output = s3.get_object(get_obj_req).sync()?;
+            // Get all matching prefixes object
+            let matching_objs_fut = s3
+                .list_objects_v2(list_objs_req)
+                .map_err(|e| -> Error { e.into() })
+                .map(|list_objs_output| {
+                    println!("xxx");
+                    list_objs_output.contents.unwrap().into_iter()
+                });
 
-            println!("Get object output content length: {}", get_obj_output.content_length.unwrap());
 
-            // dst
-            let put_obj_req = PutObjectRequest {
-                bucket: dst_path.bucket.clone(),
-                key: dst_path.key.clone(),
-                body: get_obj_output.body,
-                content_length: get_obj_output.content_length,
-                ..Default::default()
-            };
+            // Get all object contents
+            let get_obj_output_futs_fut = matching_objs_fut
+                // TODO -> and_then
+                .map(|matching_objs| {
+                    matching_objs.map(|matching_obj| {
+                        let get_obj_req = GetObjectRequest {
+                            bucket: src_path.bucket.clone(),
+                            key: matching_obj.key.clone().unwrap(),
+                            ..Default::default()
+                        };
 
-            let put_obj_output = dst_s3.put_object(put_obj_req).sync()?;
+                        s3.get_object(get_obj_req)
+                            .map_err(|e| -> Error { e.into() })
+                    })
+                });
+
+            println!("Haha2");
+
+            let _put_obj_output = get_obj_output_futs_fut
+                .map(|get_obj_output_futs| {
+                    get_obj_output_futs.map(|get_obj_output_fut| {
+                        // -> and_then
+                        get_obj_output_fut.map(|get_obj_output| {
+                            println!(
+                                "Get object output content length: {}",
+                                get_obj_output.content_length.unwrap()
+                            );
+
+                            get_obj_output
+
+                            // // dst
+                            // let put_obj_req = PutObjectRequest {
+                            //     bucket: dst_path.bucket.clone(),
+                            //     key: dst_path.key.clone(),
+                            //     body: get_obj_output.body,
+                            //     content_disposition: get_obj_output
+                            //         .content_disposition,
+                            //     content_language: get_obj_output
+                            //         .content_language,
+                            //     content_length: get_obj_output.content_length,
+                            //     // content_md5: get_obj_output.content_md5,
+                            //     content_type: get_obj_output.content_type,
+                            //     metadata: get_obj_output.metadata,
+                            //     ..Default::default()
+                            // };
+
+                            // dst_s3
+                            //     .put_object(put_obj_req)
+                            //     .map_err(|e| -> Error { e.into() })
+                        })
+                    })
+                })
+                .wait()?;
         }
     }
 
