@@ -1,7 +1,6 @@
 #[macro_use]
 extern crate lazy_static;
 
-use futures::future::Future;
 use regex::Regex;
 use rusoto_core::{HttpClient, Region};
 use rusoto_credential::EnvironmentProvider;
@@ -11,6 +10,8 @@ use rusoto_s3::{
 // use std::io::Read;
 use std::str::FromStr;
 use structopt::StructOpt;
+use tokio::prelude::{future, Future};
+use tokio::runtime;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -101,68 +102,72 @@ fn main() -> Result<(), Error> {
             };
 
             // Get all matching prefixes object
-            let matching_objs_fut = s3
+            let matching_objs = s3
                 .list_objects_v2(list_objs_req)
-                .map_err(|e| -> Error { e.into() })
-                .map(|list_objs_output| {
-                    println!("xxx");
-                    list_objs_output.contents.unwrap().into_iter()
-                });
-
+                .sync()?
+                .contents
+                .unwrap()
+                .into_iter();
 
             // Get all object contents
-            let get_obj_output_futs_fut = matching_objs_fut
-                // TODO -> and_then
-                .map(|matching_objs| {
-                    matching_objs.map(|matching_obj| {
-                        let get_obj_req = GetObjectRequest {
-                            bucket: src_path.bucket.clone(),
-                            key: matching_obj.key.clone().unwrap(),
-                            ..Default::default()
-                        };
+            let get_obj_output_futs = matching_objs.map(move |matching_obj| {
+                let get_obj_req = GetObjectRequest {
+                    bucket: src_path.bucket.clone(),
+                    key: matching_obj.key.clone().unwrap(),
+                    ..Default::default()
+                };
 
-                        s3.get_object(get_obj_req)
-                            .map_err(|e| -> Error { e.into() })
+                let key = get_obj_req.key.clone();
+
+                s3.get_object(get_obj_req)
+                    .map(|fut| (key, fut))
+                    .map_err(|e| -> Error { e.into() })
+            });
+
+            let put_obj_output_futs =
+                get_obj_output_futs.map(|get_obj_output_fut| {
+                    // TODO and_then
+                    get_obj_output_fut.map(|(key, get_obj_output)| {
+                        println!(
+                            "{}, content-length: {}",
+                            key,
+                            get_obj_output.content_length.unwrap()
+                        );
+
+                        get_obj_output
+
+                        // // dst
+                        // let put_obj_req = PutObjectRequest {
+                        //     bucket: dst_path.bucket.clone(),
+                        //     key: dst_path.key.clone(),
+                        //     body: get_obj_output.body,
+                        //     content_disposition: get_obj_output
+                        //         .content_disposition,
+                        //     content_language: get_obj_output
+                        //         .content_language,
+                        //     content_length: get_obj_output.content_length,
+                        //     // content_md5: get_obj_output.content_md5,
+                        //     content_type: get_obj_output.content_type,
+                        //     metadata: get_obj_output.metadata,
+                        //     ..Default::default()
+                        // };
+
+                        // dst_s3
+                        //     .put_object(put_obj_req)
+                        //     .map_err(|e| -> Error { e.into() })
                     })
                 });
 
-            println!("Haha2");
+            let mut rt = runtime::Builder::new().core_threads(4).build()?;
 
-            let _put_obj_output = get_obj_output_futs_fut
-                .map(|get_obj_output_futs| {
-                    get_obj_output_futs.map(|get_obj_output_fut| {
-                        // -> and_then
-                        get_obj_output_fut.map(|get_obj_output| {
-                            println!(
-                                "Get object output content length: {}",
-                                get_obj_output.content_length.unwrap()
-                            );
+            for put_obj_output_fut in put_obj_output_futs {
+                rt.spawn(put_obj_output_fut.map(|_| ()).map_err(|e| {
+                    eprintln!("Future error: {}", e);
+                    ()
+                }));
+            }
 
-                            get_obj_output
-
-                            // // dst
-                            // let put_obj_req = PutObjectRequest {
-                            //     bucket: dst_path.bucket.clone(),
-                            //     key: dst_path.key.clone(),
-                            //     body: get_obj_output.body,
-                            //     content_disposition: get_obj_output
-                            //         .content_disposition,
-                            //     content_language: get_obj_output
-                            //         .content_language,
-                            //     content_length: get_obj_output.content_length,
-                            //     // content_md5: get_obj_output.content_md5,
-                            //     content_type: get_obj_output.content_type,
-                            //     metadata: get_obj_output.metadata,
-                            //     ..Default::default()
-                            // };
-
-                            // dst_s3
-                            //     .put_object(put_obj_req)
-                            //     .map_err(|e| -> Error { e.into() })
-                        })
-                    })
-                })
-                .wait()?;
+            rt.shutdown_on_idle().wait().unwrap();
         }
     }
 
