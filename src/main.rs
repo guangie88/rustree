@@ -117,10 +117,14 @@ fn main() -> Result<(), Error> {
                     ..Default::default()
                 };
 
-                let key = get_obj_req.key.clone();
+                let rel_path = get_obj_req
+                    .key
+                    .trim_start_matches(&src_path.key)
+                    .trim_start_matches('/')
+                    .to_owned();
 
                 s3.get_object(get_obj_req)
-                    .map(|fut| (key, fut))
+                    .map(|fut| (rel_path, fut))
                     .map_err(|e| -> Error { e.into() })
             });
 
