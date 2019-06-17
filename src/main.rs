@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use structopt::StructOpt;
 use tokio::prelude::{future, Future};
 use tokio::runtime::{self, Runtime};
-use tokio_timer::clock::Clock;
+// use tokio_timer::clock::Clock;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -151,82 +151,95 @@ fn cp_action(
         }));
     }
 
-    // for put_obj_output_fut in put_obj_output_futs {
-    //     rt.spawn(future::lazy(move || {
-    //         future::poll_fn(move || {
-    //             tokio_threadpool::blocking(|| {
-    //                 put_obj_output_fut.map(|_| ()).map_err(|e| {
-    //                     eprintln!("Future error: {}", e);
-    //                     ()
-    //                 })
-    //             })
-    //         })
-    //     }));
-    // }
-
     Ok(())
 }
 
 fn main() -> Result<(), Error> {
-    let args = Args::from_args();
-    let provider = EnvironmentProvider::default();
-    let dst_provider = EnvironmentProvider::with_prefix("DST_AWS");
+    // let args = Args::from_args();
+    // let provider = EnvironmentProvider::default();
+    // let dst_provider = EnvironmentProvider::with_prefix("DST_AWS");
 
-    let s3 =
-        S3Client::new_with(HttpClient::new()?, provider, Region::ApSoutheast1);
+    // let s3 =
+    //     S3Client::new_with(HttpClient::new()?, provider, Region::ApSoutheast1);
 
-    let dst_s3 = Arc::new(Mutex::new(S3Client::new_with(
-        HttpClient::new()?,
-        dst_provider,
-        Region::ApSoutheast1,
-    )));
+    // let dst_s3 = Arc::new(Mutex::new(S3Client::new_with(
+    //     HttpClient::new()?,
+    //     dst_provider,
+    //     Region::ApSoutheast1,
+    // )));
 
-    match args.subcommand {
-        Subcommand::Cp { src, dst } => {
-            let src_path = S3Path::from_str(&src)?;
-            let dst_path = Arc::new(Mutex::new(S3Path::from_str(&dst)?));
+    // match args.subcommand {
+    //     Subcommand::Cp { src, dst } => {
+    //         let src_path = S3Path::from_str(&src)?;
+    //         let dst_path = Arc::new(Mutex::new(S3Path::from_str(&dst)?));
 
-            let mut rt = runtime::Builder::new()
-                .blocking_threads(1)
-                .clock(Clock::system())
-                .core_threads(1)
-                .build()?;
+    //         let mut rt = runtime::Builder::new()
+    //             // .blocking_threads(1)
+    //             // .clock(Clock::system())
+    //             .core_threads(1)
+    //             .build()?;
 
-            // Get initial matching prefixes objects
-            let mut is_truncated = true;
-            let mut next_continuation_token = None;
+    //         // Get initial matching prefixes objects
+    //         let mut is_truncated = true;
+    //         let mut next_continuation_token = None;
 
-            while is_truncated {
-                let list_objs_req = ListObjectsV2Request {
-                    bucket: src_path.bucket.clone(),
-                    prefix: Some(src_path.key.clone()),
-                    continuation_token: next_continuation_token,
-                    ..Default::default()
-                };
+    //         while is_truncated {
+    //             let list_objs_req = ListObjectsV2Request {
+    //                 bucket: src_path.bucket.clone(),
+    //                 prefix: Some(src_path.key.clone()),
+    //                 continuation_token: next_continuation_token,
+    //                 ..Default::default()
+    //             };
 
-                let list_obj_output =
-                    s3.list_objects_v2(list_objs_req).sync()?;
-                let matching_objs =
-                    list_obj_output.contents.unwrap().into_iter();
+    //             let list_obj_output =
+    //                 s3.list_objects_v2(list_objs_req).sync()?;
+    //             let matching_objs =
+    //                 list_obj_output.contents.unwrap().into_iter();
 
-                // Perform the actual looping src to dst copy
-                cp_action(
-                    &mut rt,
-                    &s3,
-                    dst_s3.clone(),
-                    &src_path,
-                    dst_path.clone(),
-                    matching_objs,
-                )?;
+    //             // Perform the actual looping src to dst copy
+    //             cp_action(
+    //                 &mut rt,
+    //                 &s3,
+    //                 dst_s3.clone(),
+    //                 &src_path,
+    //                 dst_path.clone(),
+    //                 matching_objs,
+    //             )?;
 
-                is_truncated = list_obj_output.is_truncated.unwrap_or(false);
-                next_continuation_token =
-                    list_obj_output.next_continuation_token.clone();
-            }
+    //             is_truncated = list_obj_output.is_truncated.unwrap_or(false);
+    //             next_continuation_token =
+    //                 list_obj_output.next_continuation_token.clone();
+    //         }
 
-            rt.shutdown_on_idle().wait().unwrap();
-        }
+    //         rt.shutdown_on_idle().wait().unwrap();
+    //     }
+    // }
+
+    // let mut tp_builder = tokio_threadpool::Builder::new();
+    // tp_builder
+    //     .name_prefix("ttest-worker-")
+    //     .pool_size(1)
+    //     .keep_alive(Some(std::time::Duration::from_secs(60)));
+
+    // let mut rt = runtime::Builder::new()
+    //     .threadpool_builder(tp_builder)
+    //     .build()?;
+
+    let mut rt = runtime::Builder::new()
+        .core_threads(1)
+        .blocking_threads(1)
+        .build()?;
+
+    for x in 0..20 {
+        let f = tokio_timer::sleep(std::time::Duration::from_secs(1))
+            .map(move |_| println!("{} done!", x))
+            .map_err(|_| ());
+
+        let exec = rt.executor();
+        exec.spawn(future::lazy(move || f));
     }
+
+    rt.shutdown_on_idle().wait().unwrap();
 
     Ok(())
 }
