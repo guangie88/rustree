@@ -11,8 +11,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use structopt::StructOpt;
 use tokio::prelude::{future, Future};
-use tokio::runtime::{self, Runtime};
-// use tokio_timer::clock::Clock;
+use tokio::runtime;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -78,75 +77,66 @@ enum Subcommand {
 }
 
 fn cp_action(
-    rt: &mut Runtime,
-    s3: &S3Client,
-    dst_s3: Arc<Mutex<S3Client>>,
-    src_path: &S3Path,
-    dst_path: Arc<Mutex<S3Path>>,
-    matching_objs: impl Iterator<Item = rusoto_s3::Object>,
-) -> Result<(), Error> {
-    let get_obj_output_futs = matching_objs.map(move |matching_obj| {
-        let get_obj_req = GetObjectRequest {
-            bucket: src_path.bucket.clone(),
-            key: matching_obj.key.clone().unwrap(),
-            ..Default::default()
-        };
+    s3: &Arc<Mutex<S3Client>>,
+    dst_s3: &Arc<Mutex<S3Client>>,
+    src_path: &Arc<Mutex<S3Path>>,
+    dst_path: &Arc<Mutex<S3Path>>,
+    matching_obj: &rusoto_s3::Object,
+) -> () {
+    let (src_bucket, src_key) = {
+        let src_path = src_path.lock().unwrap();
+        (src_path.bucket.clone(), src_path.key.clone())
+    };
 
-        let rel_key = get_obj_req
-            .key
-            .trim_start_matches(&src_path.key)
-            .trim_start_matches('/')
-            .to_owned();
+    let get_obj_req = GetObjectRequest {
+        bucket: src_bucket,
+        key: matching_obj.key.clone().unwrap(),
+        ..Default::default()
+    };
 
-        s3.get_object(get_obj_req)
-            .map(|fut| (rel_key, fut))
-            .map_err(|e| -> Error { e.into() })
-    });
+    let rel_key = get_obj_req
+        .key
+        .trim_start_matches(&src_key)
+        .trim_start_matches('/')
+        .to_owned();
 
-    let put_obj_output_futs = get_obj_output_futs.map(|get_obj_output_fut| {
-        let dst_path = dst_path.clone();
-        let dst_s3 = dst_s3.clone();
+    let get_obj_output =
+        s3.lock().unwrap().get_object(get_obj_req).sync().unwrap();
 
-        get_obj_output_fut.and_then(move |(rel_key, get_obj_output)| {
-            let dst_path = dst_path.lock().unwrap();
-            let dst_bucket = dst_path.bucket.clone();
-            let dst_path_key = dst_path.key.trim_end_matches('/').clone();
+    let (dst_bucket, dst_key) = {
+        let dst_path = dst_path.lock().unwrap();
+        (dst_path.bucket.clone(), dst_path.key.clone())
+    };
 
-            let dst_key = format!("{}/{}", dst_path_key, rel_key,);
+    let dst_path_key = dst_key.trim_end_matches('/').clone();
+    let dst_key = format!("{}/{}", dst_path_key, rel_key,);
 
-            println!(
-                "{} -> {}, content-length: {}",
-                rel_key,
-                dst_key,
-                get_obj_output.content_length.unwrap()
-            );
+    println!(
+        "{} -> {}, content-length: {}",
+        rel_key,
+        dst_key,
+        get_obj_output.content_length.unwrap()
+    );
 
-            // dst
-            let put_obj_req = PutObjectRequest {
-                bucket: dst_bucket,
-                key: dst_key,
-                body: get_obj_output.body,
-                content_disposition: get_obj_output.content_disposition,
-                content_language: get_obj_output.content_language,
-                content_length: get_obj_output.content_length,
-                content_type: get_obj_output.content_type,
-                metadata: get_obj_output.metadata,
-                ..Default::default()
-            };
+    // dst
+    let put_obj_req = PutObjectRequest {
+        bucket: dst_bucket,
+        key: dst_key,
+        body: get_obj_output.body,
+        content_disposition: get_obj_output.content_disposition,
+        content_language: get_obj_output.content_language,
+        content_length: get_obj_output.content_length,
+        content_type: get_obj_output.content_type,
+        metadata: get_obj_output.metadata,
+        ..Default::default()
+    };
 
-            dst_s3
-                .lock()
-                .unwrap()
-                .put_object(put_obj_req)
-                .map_err(|e| -> Error { e.into() })
-        })
-    });
-
-    for put_obj_output_fut in put_obj_output_futs {
-        let _ = rt.block_on(future::lazy(move || put_obj_output_fut.map(|_| ()).map_err(|_| ())));
-    }
-
-    Ok(())
+    dst_s3
+        .lock()
+        .unwrap()
+        .put_object(put_obj_req)
+        .sync()
+        .unwrap();
 }
 
 fn main() -> Result<(), Error> {
@@ -154,8 +144,11 @@ fn main() -> Result<(), Error> {
     let provider = EnvironmentProvider::default();
     let dst_provider = EnvironmentProvider::with_prefix("DST_AWS");
 
-    let s3 =
-        S3Client::new_with(HttpClient::new()?, provider, Region::ApSoutheast1);
+    let s3 = Arc::new(Mutex::new(S3Client::new_with(
+        HttpClient::new()?,
+        provider,
+        Region::ApSoutheast1,
+    )));
 
     let dst_s3 = Arc::new(Mutex::new(S3Client::new_with(
         HttpClient::new()?,
@@ -165,7 +158,7 @@ fn main() -> Result<(), Error> {
 
     match args.subcommand {
         Subcommand::Cp { src, dst } => {
-            let src_path = S3Path::from_str(&src)?;
+            let src_path = Arc::new(Mutex::new(S3Path::from_str(&src)?));
             let dst_path = Arc::new(Mutex::new(S3Path::from_str(&dst)?));
 
             let mut rt = runtime::Builder::new().blocking_threads(4).build()?;
@@ -175,27 +168,48 @@ fn main() -> Result<(), Error> {
             let mut next_continuation_token = None;
 
             while is_truncated {
+                let src_path_locked = src_path.lock().unwrap();
+
                 let list_objs_req = ListObjectsV2Request {
-                    bucket: src_path.bucket.clone(),
-                    prefix: Some(src_path.key.clone()),
+                    bucket: src_path_locked.bucket.clone(),
+                    prefix: Some(src_path_locked.key.clone()),
                     continuation_token: next_continuation_token,
                     ..Default::default()
                 };
 
                 let list_obj_output =
-                    s3.list_objects_v2(list_objs_req).sync()?;
+                    s3.lock().unwrap().list_objects_v2(list_objs_req).sync()?;
+
                 let matching_objs =
                     list_obj_output.contents.unwrap().into_iter();
 
                 // Perform the actual looping src to dst copy
-                cp_action(
-                    &mut rt,
-                    &s3,
-                    dst_s3.clone(),
-                    &src_path,
-                    dst_path.clone(),
-                    matching_objs,
-                )?;
+                for matching_obj in matching_objs {
+                    let s3 = s3.clone();
+                    let dst_s3 = dst_s3.clone();
+                    let src_path = src_path.clone();
+                    let dst_path = dst_path.clone();
+
+                    rt.spawn(
+                        future::lazy(move || {
+                            future::poll_fn(move || {
+                                tokio_threadpool::blocking(|| {
+                                    cp_action(
+                                        &s3,
+                                        &dst_s3,
+                                        &src_path,
+                                        &dst_path,
+                                        &matching_obj,
+                                    );
+                                })
+                            })
+                        })
+                        .map_err(|err| {
+                            eprintln!("Error: {}", err);
+                            ()
+                        })
+                    );
+                }
 
                 is_truncated = list_obj_output.is_truncated.unwrap_or(false);
                 next_continuation_token =
