@@ -215,28 +215,25 @@ fn main() -> Result<(), Error> {
     //     }
     // }
 
-    // let mut tp_builder = tokio_threadpool::Builder::new();
-    // tp_builder
-    //     .name_prefix("ttest-worker-")
-    //     .pool_size(1)
-    //     .keep_alive(Some(std::time::Duration::from_secs(60)));
-
-    // let mut rt = runtime::Builder::new()
-    //     .threadpool_builder(tp_builder)
-    //     .build()?;
-
     let mut rt = runtime::Builder::new()
-        .core_threads(1)
-        .blocking_threads(1)
+        // this should follow your system thread count, no need to set
+        // .core_threads(4) 
+        .blocking_threads(4)
         .build()?;
 
-    for x in 0..20 {
-        let f = tokio_timer::sleep(std::time::Duration::from_secs(1))
-            .map(move |_| println!("{} done!", x))
-            .map_err(|_| ());
-
-        let exec = rt.executor();
-        exec.spawn(future::lazy(move || f));
+    for x in 0..12 {
+        rt.spawn(
+            future::lazy(move || {
+                future::poll_fn(move || {
+                    tokio_threadpool::blocking(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        println!("{:02} done!", x)
+                    })
+                })
+            })
+            .map(|_| ())
+            .map_err(|_| ()),
+        );
     }
 
     rt.shutdown_on_idle().wait().unwrap();
