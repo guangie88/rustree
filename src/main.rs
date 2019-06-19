@@ -82,7 +82,7 @@ fn cp_action(
     src_path: &Arc<Mutex<S3Path>>,
     dst_path: &Arc<Mutex<S3Path>>,
     matching_obj: &rusoto_s3::Object,
-) -> () {
+) -> Result<(), Error> {
     let (src_bucket, src_key) = {
         let src_path = src_path.lock().unwrap();
         (src_path.bucket.clone(), src_path.key.clone())
@@ -100,15 +100,14 @@ fn cp_action(
         .trim_start_matches('/')
         .to_owned();
 
-    let get_obj_output =
-        s3.lock().unwrap().get_object(get_obj_req).sync().unwrap();
+    let get_obj_output = s3.lock().unwrap().get_object(get_obj_req).sync()?;
 
     let (dst_bucket, dst_key) = {
         let dst_path = dst_path.lock().unwrap();
         (dst_path.bucket.clone(), dst_path.key.clone())
     };
 
-    let dst_path_key = dst_key.trim_end_matches('/').clone();
+    let dst_path_key = dst_key.trim_end_matches('/');
     let dst_key = format!("{}/{}", dst_path_key, rel_key,);
 
     println!(
@@ -131,12 +130,9 @@ fn cp_action(
         ..Default::default()
     };
 
-    dst_s3
-        .lock()
-        .unwrap()
-        .put_object(put_obj_req)
-        .sync()
-        .unwrap();
+    dst_s3.lock().unwrap().put_object(put_obj_req).sync()?;
+
+    Ok(())
 }
 
 fn main() -> Result<(), Error> {
@@ -194,20 +190,23 @@ fn main() -> Result<(), Error> {
                         future::lazy(move || {
                             future::poll_fn(move || {
                                 tokio_threadpool::blocking(|| {
-                                    cp_action(
+                                    let res = cp_action(
                                         &s3,
                                         &dst_s3,
                                         &src_path,
                                         &dst_path,
                                         &matching_obj,
                                     );
+
+                                    if let Err(err) = res {
+                                        eprintln!("Copy action error: {}", err);
+                                    }
                                 })
                             })
                         })
                         .map_err(|err| {
-                            eprintln!("Error: {}", err);
-                            ()
-                        })
+                            eprintln!("Future lazy error: {}", err);
+                        }),
                     );
                 }
 
