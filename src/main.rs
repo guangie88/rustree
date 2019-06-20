@@ -164,13 +164,15 @@ fn main() -> Result<(), Error> {
             let mut next_continuation_token = None;
 
             while is_truncated {
-                let src_path_locked = src_path.lock().unwrap();
+                let list_objs_req = {
+                    let src_path = src_path.lock().unwrap();
 
-                let list_objs_req = ListObjectsV2Request {
-                    bucket: src_path_locked.bucket.clone(),
-                    prefix: Some(src_path_locked.key.clone()),
-                    continuation_token: next_continuation_token,
-                    ..Default::default()
+                    ListObjectsV2Request {
+                        bucket: src_path.bucket.clone(),
+                        prefix: Some(src_path.key.clone()),
+                        continuation_token: next_continuation_token,
+                        ..Default::default()
+                    }
                 };
 
                 let list_obj_output =
